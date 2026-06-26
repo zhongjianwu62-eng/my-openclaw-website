@@ -50,6 +50,7 @@ class Config:
         sync_days,
         initial_balance,
         strict_permission_check,
+        auto_discover,
     ):
         self.api_key = api_key
         self.api_secret = api_secret
@@ -57,6 +58,7 @@ class Config:
         self.sync_days = sync_days
         self.initial_balance = initial_balance
         self.strict_permission_check = strict_permission_check
+        self.auto_discover = auto_discover
 
 
 def load_dotenv(path: Path) -> Dict[str, str]:
@@ -85,6 +87,7 @@ def read_config() -> Config:
     sync_days = int(getenv("BINANCE_SYNC_DAYS", env_values, "30"))
     initial_balance = float(getenv("OPENCLAW_INITIAL_BALANCE", env_values, "0") or 0)
     strict_permission_check = getenv("BINANCE_STRICT_PERMISSION_CHECK", env_values, "0") == "1"
+    auto_discover = getenv("BINANCE_AUTO_DISCOVER", env_values, "1") != "0"
 
     if not api_key or not api_secret:
         raise SyncError("Missing BINANCE_API_KEY or BINANCE_API_SECRET in .env")
@@ -100,6 +103,7 @@ def read_config() -> Config:
         sync_days=sync_days,
         initial_balance=initial_balance,
         strict_permission_check=strict_permission_check,
+        auto_discover=auto_discover,
     )
 
 
@@ -159,12 +163,60 @@ def check_permissions(config: Config) -> None:
         raise SyncError("API key does not have reading permission enabled")
 
 
-def fetch_user_trades(config: Config) -> List[Dict[str, Any]]:
+def discover_symbols_from_income(config: Config) -> List[str]:
+    end = now_ms()
+    start = end - config.sync_days * 24 * 60 * 60 * 1000
+    symbols = set()
+
+    print("[INFO] Discovering traded symbols from Binance income history")
+    chunk_start = start
+    while chunk_start < end:
+        chunk_end = min(chunk_start + SEVEN_DAYS_MS - 1, end)
+        page = 1
+        while True:
+            params = {
+                "startTime": chunk_start,
+                "endTime": chunk_end,
+                "page": page,
+                "limit": 1000,
+            }
+            rows = signed_get(FAPI_BASE, "/fapi/v1/income", params, config)
+            if not isinstance(rows, list):
+                raise SyncError(f"Unexpected income response: {rows}")
+            for row in rows:
+                symbol = str(row.get("symbol") or "").upper().strip()
+                if symbol.endswith("USDT"):
+                    symbols.add(symbol)
+            if len(rows) < 1000:
+                break
+            page += 1
+            time.sleep(0.08)
+        print(f"[INFO] Income {datetime_from_ms(chunk_start)} -> {datetime_from_ms(chunk_end)}: {len(symbols)} symbols so far")
+        chunk_start = chunk_end + 1
+        time.sleep(0.08)
+
+    return sorted(symbols)
+
+
+def resolve_markets(config: Config) -> List[str]:
+    if not config.auto_discover:
+        return config.markets
+
+    discovered = discover_symbols_from_income(config)
+    if discovered:
+        print(f"[INFO] Auto-discovered symbols: {', '.join(discovered)}")
+        return discovered
+
+    print(f"[WARN] No symbols discovered from income history. Falling back to BINANCE_MARKETS: {', '.join(config.markets)}")
+    return config.markets
+
+
+def fetch_user_trades(config: Config, markets: List[str]) -> List[Dict[str, Any]]:
     end = now_ms()
     start = end - config.sync_days * 24 * 60 * 60 * 1000
     all_trades: List[Dict[str, Any]] = []
 
-    for symbol in config.markets:
+    for symbol in markets:
         chunk_start = start
         print(f"[INFO] Syncing {symbol}")
         while chunk_start < end:
@@ -359,9 +411,20 @@ def self_test() -> None:
     print("self-test-ok")
 
 
+def check_api(config: Config) -> None:
+    check_permissions(config)
+    symbols = resolve_markets(config)
+    balance = fetch_usdt_balance(config)
+    print("api-ok")
+    print(f"auto-discover={'on' if config.auto_discover else 'off'}")
+    print(f"symbols={','.join(symbols) if symbols else '--'}")
+    print(f"usdt-balance={balance if balance is not None else '--'}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sync Binance read-only trade history into local OpenClaw JSON files.")
     parser.add_argument("--check-config", action="store_true", help="Validate local .env and exit without network sync.")
+    parser.add_argument("--check-api", action="store_true", help="Test Binance read-only API access without writing files.")
     parser.add_argument("--self-test", action="store_true", help="Run offline converter tests and exit.")
     args = parser.parse_args()
 
@@ -374,8 +437,12 @@ def main() -> int:
         if args.check_config:
             print("config-ok")
             return 0
+        if args.check_api:
+            check_api(config)
+            return 0
         check_permissions(config)
-        raw_trades = fetch_user_trades(config)
+        markets = resolve_markets(config)
+        raw_trades = fetch_user_trades(config, markets)
         api_balance = fetch_usdt_balance(config)
         initial = api_balance if api_balance is not None and not raw_trades else config.initial_balance
         trades = normalize_trades(raw_trades, initial)
