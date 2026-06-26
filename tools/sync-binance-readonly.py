@@ -51,6 +51,7 @@ class Config:
         api_key,
         api_secret,
         markets,
+        option_symbols,
         sync_days,
         initial_balance,
         strict_permission_check,
@@ -59,6 +60,7 @@ class Config:
         self.api_key = api_key
         self.api_secret = api_secret
         self.markets = markets
+        self.option_symbols = option_symbols
         self.sync_days = sync_days
         self.initial_balance = initial_balance
         self.strict_permission_check = strict_permission_check
@@ -88,6 +90,8 @@ def read_config() -> Config:
     api_secret = getenv("BINANCE_API_SECRET", env_values)
     markets_raw = getenv("BINANCE_MARKETS", env_values, "BTCUSDT,ETHUSDT,SOLUSDT")
     markets = [item.strip().upper() for item in markets_raw.split(",") if item.strip()]
+    option_symbols_raw = getenv("BINANCE_OPTION_SYMBOLS", env_values, "")
+    option_symbols = [item.strip().upper() for item in option_symbols_raw.split(",") if item.strip()]
     sync_days = int(getenv("BINANCE_SYNC_DAYS", env_values, "30"))
     initial_balance = float(getenv("OPENCLAW_INITIAL_BALANCE", env_values, "0") or 0)
     strict_permission_check = getenv("BINANCE_STRICT_PERMISSION_CHECK", env_values, "0") == "1"
@@ -104,6 +108,7 @@ def read_config() -> Config:
         api_key=api_key,
         api_secret=api_secret,
         markets=markets,
+        option_symbols=option_symbols,
         sync_days=sync_days,
         initial_balance=initial_balance,
         strict_permission_check=strict_permission_check,
@@ -263,6 +268,47 @@ def fetch_user_trades(config: Config, markets: List[str]) -> List[Dict[str, Any]
     return list(deduped.values())
 
 
+def fetch_options_user_trades(config: Config) -> List[Dict[str, Any]]:
+    end = now_ms()
+    start = end - config.sync_days * 24 * 60 * 60 * 1000
+    all_trades: List[Dict[str, Any]] = []
+    symbols = config.option_symbols or [None]
+
+    for symbol in symbols:
+        chunk_start = start
+        label = symbol if symbol else "all option symbols"
+        print(f"[INFO] Syncing options trades for {label}")
+        while chunk_start < end:
+            chunk_end = min(chunk_start + SEVEN_DAYS_MS - 1, end)
+            params = {
+                "startTime": chunk_start,
+                "endTime": chunk_end,
+                "limit": 1000,
+            }
+            if symbol:
+                params["symbol"] = symbol
+            try:
+                rows = signed_get(EAPI_BASE, "/eapi/v1/userTrades", params, config)
+            except SyncError as error:
+                print(f"[WARN] Options user trades unavailable: {error}")
+                return all_trades
+            if isinstance(rows, list):
+                all_trades.extend(rows)
+                print(f"[INFO] Options {datetime_from_ms(chunk_start)} -> {datetime_from_ms(chunk_end)}: {len(rows)} fills")
+            else:
+                print(f"[WARN] Unexpected options trades response: {rows}")
+                return all_trades
+            chunk_start = chunk_end + 1
+            time.sleep(0.08)
+
+    all_trades.sort(key=lambda item: int(item.get("time") or item.get("createTime") or item.get("updateTime") or 0))
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for row in all_trades:
+        trade_id = f"options:{row.get('symbol')}:{row.get('id') or row.get('tradeId')}:{row.get('orderId')}:{row.get('time') or row.get('createTime')}"
+        deduped[trade_id] = row
+    return list(deduped.values())
+
+
 def fetch_usdm_balances(config: Config) -> List[Dict[str, Any]]:
     try:
         balances = signed_get(FAPI_BASE, "/fapi/v2/balance", {}, config)
@@ -418,6 +464,25 @@ def datetime_from_ms(value: Any) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def time_ms_from_row(row: Dict[str, Any]) -> int:
+    value = row.get("time") or row.get("createTime") or row.get("updateTime") or row.get("tradeTime") or now_ms()
+    return int(value)
+
+
+def trade_time_ms(trade: Dict[str, Any]) -> int:
+    value = trade.get("timeMs")
+    if value is not None:
+        return int(value)
+    return now_ms()
+
+
+def parse_float_value(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def infer_direction(row: Dict[str, Any], realized_pnl: float) -> str:
     position_side = str(row.get("positionSide") or "").upper()
     side = str(row.get("side") or "").upper()
@@ -436,8 +501,8 @@ def normalize_trades(raw_trades: List[Dict[str, Any]], initial_balance: float) -
 
     for row in raw_trades:
         side = str(row.get("side") or "").upper()
-        realized_pnl = float(row.get("realizedPnl") or 0)
-        commission = abs(float(row.get("commission") or 0))
+        realized_pnl = parse_float_value(row.get("realizedPnl") or row.get("realizedPNL"))
+        commission = abs(parse_float_value(row.get("commission")))
         net_pnl = realized_pnl - commission
         if abs(realized_pnl) > 0 or commission > 0:
             running_balance += net_pnl
@@ -447,12 +512,13 @@ def normalize_trades(raw_trades: List[Dict[str, Any]], initial_balance: float) -
         normalized.append(
             {
                 "time": datetime_from_ms(row.get("time", now_ms())),
+                "timeMs": time_ms_from_row(row),
                 "type": "BUY" if side == "BUY" else "SELL",
                 "symbol": str(row.get("symbol") or "").upper(),
-                "amount": float(row.get("qty") or 0),
-                "price": float(row.get("price") or 0),
+                "amount": parse_float_value(row.get("qty") or row.get("quantity")),
+                "price": parse_float_value(row.get("price")),
                 "pnl": round(net_pnl, 8),
-                "reason": "Binance read-only sync",
+                "reason": "Binance futures read-only sync",
                 "direction": direction,
                 "leverage": None,
                 "balance": round(running_balance, 8),
@@ -465,6 +531,53 @@ def normalize_trades(raw_trades: List[Dict[str, Any]], initial_balance: float) -
         )
 
     return normalized
+
+
+def normalize_options_trades(raw_trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+
+    for row in raw_trades:
+        side = str(row.get("side") or row.get("direction") or "").upper()
+        time_ms = time_ms_from_row(row)
+        fee = abs(parse_float_value(row.get("fee") or row.get("commission")))
+        realized_pnl = parse_float_value(row.get("realizedPNL") or row.get("realizedPnl") or row.get("pnl"))
+        net_pnl = realized_pnl - fee
+        option_side = str(row.get("optionSide") or row.get("type") or "").upper()
+        direction = "call" if option_side == "CALL" else "put" if option_side == "PUT" else "option"
+        quantity = parse_float_value(row.get("quantity") or row.get("qty"))
+
+        normalized.append(
+            {
+                "time": datetime_from_ms(time_ms),
+                "timeMs": time_ms,
+                "type": "BUY" if side == "BUY" else "SELL" if side == "SELL" else side or "OPTION",
+                "symbol": str(row.get("symbol") or "").upper(),
+                "amount": quantity,
+                "price": parse_float_value(row.get("price")),
+                "pnl": round(net_pnl, 8),
+                "reason": "Binance options read-only sync",
+                "direction": direction,
+                "leverage": None,
+                "balance": 0.0,
+                "tradeAction": "OPTION",
+                "fee": fee,
+                "commissionAsset": row.get("feeAsset") or row.get("commissionAsset"),
+                "binanceOrderId": row.get("orderId"),
+                "binanceTradeId": row.get("id") or row.get("tradeId"),
+                "source": "binance_options",
+            }
+        )
+
+    return normalized
+
+
+def apply_running_balance(trades: List[Dict[str, Any]], initial_balance: float) -> List[Dict[str, Any]]:
+    sorted_trades = sorted(trades, key=trade_time_ms)
+    running_balance = float(initial_balance)
+    for trade in sorted_trades:
+        running_balance += parse_float_value(trade.get("pnl"))
+        trade["balance"] = round(running_balance, 8)
+    return sorted_trades
 
 
 def load_json(path: Path, fallback: Any) -> Any:
@@ -560,10 +673,30 @@ def self_test() -> None:
         },
     ]
     trades = normalize_trades(sample, 100)
-    assert len(trades) == 2
+    option_trades = normalize_options_trades(
+        [
+            {
+                "symbol": "BTC-240329-70000-C",
+                "id": 3,
+                "orderId": 13,
+                "side": "BUY",
+                "price": "12.5",
+                "quantity": "0.1",
+                "fee": "0.01",
+                "feeAsset": "USDT",
+                "realizedPNL": "0",
+                "time": 1710007200000,
+                "optionSide": "CALL",
+            }
+        ]
+    )
+    trades = apply_running_balance(trades + option_trades, 100)
+    assert len(trades) == 3
+    assert len(option_trades) == 1
     assert trades[0]["tradeAction"] == "OPEN"
     assert trades[1]["tradeAction"] == "CLOSE"
     assert trades[1]["direction"] == "long"
+    assert trades[2]["source"] == "binance_options"
     status = build_status(trades, None)
     assert status["mode"] == "binance-readonly-sync"
     print("self-test-ok")
@@ -603,10 +736,13 @@ def main() -> int:
         check_permissions(config)
         markets = resolve_markets(config)
         raw_trades = fetch_user_trades(config, markets)
+        raw_option_trades = fetch_options_user_trades(config)
         total_assets = fetch_total_assets(config)
         final_balance = float(total_assets.get("total_usdt", 0.0))
-        initial = final_balance if final_balance and not raw_trades else config.initial_balance
-        trades = normalize_trades(raw_trades, initial)
+        initial = final_balance if final_balance and not raw_trades and not raw_option_trades else config.initial_balance
+        futures_trades = normalize_trades(raw_trades, initial)
+        option_trades = normalize_options_trades(raw_option_trades)
+        trades = apply_running_balance(futures_trades + option_trades, initial)
         status = build_status(trades, total_assets)
         write_outputs(trades, status)
         print(f"[OK] Synced {len(trades)} fills into {TRADES_FILE.name} and {STATUS_FILE.name}")
