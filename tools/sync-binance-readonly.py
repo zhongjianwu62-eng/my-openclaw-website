@@ -33,8 +33,12 @@ BACKUP_DIR = ROOT / "backups"
 
 FAPI_BASE = "https://fapi.binance.com"
 SAPI_BASE = "https://api.binance.com"
+SPOT_BASE = "https://api.binance.com"
+DAPI_BASE = "https://dapi.binance.com"
+EAPI_BASE = "https://eapi.binance.com"
 
 SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
+STABLE_USD_ASSETS = {"USDT", "USDC", "FDUSD", "BUSD", "TUSD", "USDP", "DAI"}
 
 
 class SyncError(RuntimeError):
@@ -124,6 +128,21 @@ def signed_get(base_url: str, path: str, params: Dict[str, Any], config: Config)
     query = sign_query(payload, config.api_secret)
     url = f"{base_url}{path}?{query}"
     request = urllib.request.Request(url, headers={"X-MBX-APIKEY": config.api_key})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = response.read().decode("utf-8")
+            return json.loads(data)
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        raise SyncError(f"Binance HTTP {error.code} for {path}: {body}") from error
+    except urllib.error.URLError as error:
+        raise SyncError(f"Network error for {path}: {error}") from error
+
+
+def public_get(base_url: str, path: str, params: Dict[str, Any]) -> Any:
+    query = urllib.parse.urlencode(params, doseq=True)
+    url = f"{base_url}{path}?{query}" if query else f"{base_url}{path}"
+    request = urllib.request.Request(url)
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             data = response.read().decode("utf-8")
@@ -244,22 +263,146 @@ def fetch_user_trades(config: Config, markets: List[str]) -> List[Dict[str, Any]
     return list(deduped.values())
 
 
-def fetch_usdt_balance(config: Config) -> Optional[float]:
+def fetch_usdm_balances(config: Config) -> List[Dict[str, Any]]:
     try:
         balances = signed_get(FAPI_BASE, "/fapi/v2/balance", {}, config)
     except SyncError as error:
-        print(f"[WARN] Balance endpoint unavailable: {error}")
-        return None
-    if not isinstance(balances, list):
-        return None
-    for row in balances:
-        if row.get("asset") == "USDT":
-            for key in ("balance", "crossWalletBalance", "availableBalance"):
-                try:
-                    return float(row.get(key))
-                except (TypeError, ValueError):
-                    continue
+        print(f"[WARN] USD-M futures balance unavailable: {error}")
+        return []
+    return balances if isinstance(balances, list) else []
+
+
+def fetch_coinm_balances(config: Config) -> List[Dict[str, Any]]:
+    try:
+        balances = signed_get(DAPI_BASE, "/dapi/v1/balance", {}, config)
+    except SyncError as error:
+        print(f"[WARN] COIN-M futures balance unavailable: {error}")
+        return []
+    return balances if isinstance(balances, list) else []
+
+
+def fetch_spot_balances(config: Config) -> List[Dict[str, Any]]:
+    try:
+        account = signed_get(SPOT_BASE, "/api/v3/account", {}, config)
+    except SyncError as error:
+        print(f"[WARN] Spot account balance unavailable: {error}")
+        return []
+    balances = account.get("balances") if isinstance(account, dict) else []
+    return balances if isinstance(balances, list) else []
+
+
+def fetch_options_balances(config: Config) -> List[Dict[str, Any]]:
+    try:
+        account = signed_get(EAPI_BASE, "/eapi/v1/account", {}, config)
+    except SyncError as error:
+        print(f"[WARN] Options account balance unavailable: {error}")
+        return []
+    if isinstance(account, dict):
+        for key in ("asset", "assets", "balances"):
+            rows = account.get(key)
+            if isinstance(rows, list):
+                return rows
+    return account if isinstance(account, list) else []
+
+
+def first_float(row: Dict[str, Any], keys: List[str]) -> Optional[float]:
+    for key in keys:
+        try:
+            return float(row.get(key))
+        except (TypeError, ValueError):
+            continue
     return None
+
+
+def price_asset_in_usdt(asset: str, price_cache: Dict[str, Optional[float]]) -> Optional[float]:
+    asset = asset.upper()
+    if asset in STABLE_USD_ASSETS:
+        return 1.0
+    if asset in price_cache:
+        return price_cache[asset]
+
+    symbol = f"{asset}USDT"
+    try:
+        ticker = public_get(SPOT_BASE, "/api/v3/ticker/price", {"symbol": symbol})
+        price = float(ticker.get("price"))
+        price_cache[asset] = price
+        return price
+    except Exception:
+        price_cache[asset] = None
+        return None
+
+
+def add_asset_value(
+    breakdown: Dict[str, Any],
+    account: str,
+    asset: str,
+    amount: float,
+    price_cache: Dict[str, Optional[float]],
+) -> None:
+    if abs(amount) <= 0:
+        return
+    price = price_asset_in_usdt(asset, price_cache)
+    row = breakdown.setdefault(
+        account,
+        {
+            "total_usdt": 0.0,
+            "assets": [],
+            "unpriced_assets": [],
+        },
+    )
+    if price is None:
+        row["unpriced_assets"].append({"asset": asset, "amount": amount})
+        return
+    value = amount * price
+    row["total_usdt"] += value
+    row["assets"].append(
+        {
+            "asset": asset,
+            "amount": round(amount, 12),
+            "price_usdt": round(price, 8),
+            "value_usdt": round(value, 8),
+        }
+    )
+
+
+def fetch_total_assets(config: Config) -> Dict[str, Any]:
+    price_cache: Dict[str, Optional[float]] = {}
+    breakdown: Dict[str, Any] = {}
+
+    for row in fetch_spot_balances(config):
+        asset = str(row.get("asset") or "").upper()
+        free = first_float(row, ["free"]) or 0.0
+        locked = first_float(row, ["locked"]) or 0.0
+        add_asset_value(breakdown, "spot", asset, free + locked, price_cache)
+
+    for row in fetch_usdm_balances(config):
+        asset = str(row.get("asset") or "").upper()
+        amount = first_float(row, ["balance", "crossWalletBalance", "availableBalance"]) or 0.0
+        add_asset_value(breakdown, "usdm_futures", asset, amount, price_cache)
+
+    for row in fetch_coinm_balances(config):
+        asset = str(row.get("asset") or "").upper()
+        amount = first_float(row, ["balance", "walletBalance", "crossWalletBalance", "availableBalance"]) or 0.0
+        add_asset_value(breakdown, "coinm_futures", asset, amount, price_cache)
+
+    for row in fetch_options_balances(config):
+        asset = str(row.get("asset") or row.get("currency") or "").upper()
+        amount = first_float(row, ["equity", "marginBalance", "walletBalance", "available", "balance"]) or 0.0
+        add_asset_value(breakdown, "options", asset, amount, price_cache)
+
+    total = sum(float(item.get("total_usdt", 0.0)) for item in breakdown.values())
+    for item in breakdown.values():
+        item["total_usdt"] = round(float(item.get("total_usdt", 0.0)), 8)
+    return {
+        "total_usdt": round(total, 8),
+        "breakdown": breakdown,
+    }
+
+
+def fetch_usdt_balance(config: Config) -> Optional[float]:
+    total_assets = fetch_total_assets(config)
+    return float(total_assets.get("total_usdt", 0.0))
+
 
 
 def datetime_from_ms(value: Any) -> str:
@@ -330,9 +473,13 @@ def backup_existing_files() -> None:
             shutil.copy2(path, BACKUP_DIR / f"{path.stem}-{timestamp}.json")
 
 
-def build_status(trades: List[Dict[str, Any]], api_balance: Optional[float]) -> Dict[str, Any]:
+def build_status(trades: List[Dict[str, Any]], total_assets: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     existing = load_json(STATUS_FILE, {})
-    final_balance = api_balance
+    final_balance = None
+    account_breakdown = {}
+    if isinstance(total_assets, dict):
+        final_balance = total_assets.get("total_usdt")
+        account_breakdown = total_assets.get("breakdown") or {}
     if final_balance is None:
         final_balance = float(trades[-1]["balance"]) if trades else 0.0
 
@@ -340,6 +487,7 @@ def build_status(trades: List[Dict[str, Any]], api_balance: Optional[float]) -> 
     recent_events = [
         f"Binance read-only sync {datetime.now().strftime('%H:%M:%S')}",
         f"Imported {len(trades)} fills",
+        f"Estimated total assets: {round(float(final_balance), 4)} USDT",
         f"Watchlist: {', '.join(watchlist[:8]) if watchlist else '--'}",
         "No order, cancel, transfer, or withdraw code executed",
     ]
@@ -358,6 +506,8 @@ def build_status(trades: List[Dict[str, Any]], api_balance: Optional[float]) -> 
         "positions": 0,
         "open_positions": [],
         "mode": "binance-readonly-sync",
+        "account_total_usdt": round(float(final_balance), 8),
+        "account_breakdown": account_breakdown,
         "watchlist": watchlist,
         "top_signal": {"symbol": None, "direction": None, "score": None},
         "strategy_changes": [],
@@ -414,11 +564,13 @@ def self_test() -> None:
 def check_api(config: Config) -> None:
     check_permissions(config)
     symbols = resolve_markets(config)
-    balance = fetch_usdt_balance(config)
+    total_assets = fetch_total_assets(config)
     print("api-ok")
     print(f"auto-discover={'on' if config.auto_discover else 'off'}")
     print(f"symbols={','.join(symbols) if symbols else '--'}")
-    print(f"usdt-balance={balance if balance is not None else '--'}")
+    print(f"total-assets-usdt={total_assets.get('total_usdt', 0)}")
+    for account, detail in sorted((total_assets.get("breakdown") or {}).items()):
+        print(f"{account}={detail.get('total_usdt', 0)} USDT")
 
 
 def main() -> int:
@@ -443,10 +595,11 @@ def main() -> int:
         check_permissions(config)
         markets = resolve_markets(config)
         raw_trades = fetch_user_trades(config, markets)
-        api_balance = fetch_usdt_balance(config)
-        initial = api_balance if api_balance is not None and not raw_trades else config.initial_balance
+        total_assets = fetch_total_assets(config)
+        final_balance = float(total_assets.get("total_usdt", 0.0))
+        initial = final_balance if final_balance and not raw_trades else config.initial_balance
         trades = normalize_trades(raw_trades, initial)
-        status = build_status(trades, api_balance)
+        status = build_status(trades, total_assets)
         write_outputs(trades, status)
         print(f"[OK] Synced {len(trades)} fills into {TRADES_FILE.name} and {STATUS_FILE.name}")
         return 0
