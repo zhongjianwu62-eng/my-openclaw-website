@@ -3,6 +3,7 @@ __pycache__/
 *.log
 .DS_Store
 release/
+backups/
 *.tar.gz
 *.db
 .cf-pages-release/

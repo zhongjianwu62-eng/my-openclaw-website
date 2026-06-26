@@ -27,6 +27,7 @@
 - `deploy.sh`：服务器拉取 GitHub 最新代码并部署
 - `nginx-openclaw.conf`：Nginx 配置模板，已开启 gzip
 - `make-release.sh`：生成压缩包，方便手动上传
+- `tools/sync-binance-readonly.py`：从币安只读 API 同步历史成交到本地 JSON
 
 ## 第一次部署到 Linux 服务器
 
@@ -85,6 +86,86 @@ cd /var/www/openclaw-trading-bot
 4. 复制静态网页和 JSON 数据
 5. 测试 Nginx 配置
 6. 重载 Nginx
+
+## 币安只读 API 同步真实交易记录
+
+这个功能只读取历史成交记录，不会下单、撤单、转账或提现。
+
+### 1. 在币安创建只读 API
+
+请在币安 API 管理里创建 API Key，并确认：
+
+- 只开启读取权限
+- 不开启现货交易
+- 不开启合约交易
+- 不开启提现
+- 不开启划转
+- 建议绑定小龙虾服务器公网 IP
+
+### 2. 在服务器配置 `.env`
+
+```bash
+cd /var/www/openclaw-trading-bot
+cp .env.example .env
+nano .env
+```
+
+示例：
+
+```env
+BINANCE_API_KEY=你的只读API_KEY
+BINANCE_API_SECRET=你的只读API_SECRET
+BINANCE_MARKETS=BTCUSDT,ETHUSDT,SOLUSDT
+BINANCE_SYNC_DAYS=30
+OPENCLAW_INITIAL_BALANCE=0
+BINANCE_STRICT_PERMISSION_CHECK=0
+```
+
+说明：
+
+- `.env` 已经被 `.gitignore` 忽略，不能上传 GitHub。
+- 如果 `BINANCE_STRICT_PERMISSION_CHECK=1`，权限检查失败也会停止同步。
+- 如果币安返回 API 开了交易或提现等危险权限，脚本会直接停止。
+
+### 3. 测试脚本
+
+```bash
+python3 tools/sync-binance-readonly.py --self-test
+python3 tools/sync-binance-readonly.py --check-config
+```
+
+### 4. 开始同步
+
+```bash
+python3 tools/sync-binance-readonly.py
+```
+
+同步成功后会更新：
+
+- `trades.json`
+- `status.json`
+
+旧文件会自动备份到：
+
+```text
+backups/
+```
+
+### 5. 定时同步，可选
+
+如果你希望每 10 分钟同步一次：
+
+```bash
+crontab -e
+```
+
+加入：
+
+```cron
+*/10 * * * * cd /var/www/openclaw-trading-bot && python3 tools/sync-binance-readonly.py >> sync.log 2>&1
+```
+
+网页仍然是静态页面，Nginx 不需要重启。
 
 ## 手动压缩发布
 

@@ -20,8 +20,11 @@ cp "${ROOT_DIR}/trades.json" "${RELEASE_DIR}/openclaw-trading-bot/"
 cp "${ROOT_DIR}/thinking.json" "${RELEASE_DIR}/openclaw-trading-bot/"
 cp "${ROOT_DIR}/strategy_v2.json" "${RELEASE_DIR}/openclaw-trading-bot/"
 cp "${ROOT_DIR}/README.md" "${RELEASE_DIR}/openclaw-trading-bot/"
+cp "${ROOT_DIR}/.env.example" "${RELEASE_DIR}/openclaw-trading-bot/"
 cp "${ROOT_DIR}/deploy.sh" "${RELEASE_DIR}/openclaw-trading-bot/"
 cp "${ROOT_DIR}/nginx-openclaw.conf" "${RELEASE_DIR}/openclaw-trading-bot/"
+mkdir -p "${RELEASE_DIR}/openclaw-trading-bot/tools"
+cp "${ROOT_DIR}/tools/sync-binance-readonly.py" "${RELEASE_DIR}/openclaw-trading-bot/tools/"
 
 log "Creating compressed package"
 tar -czf "${RELEASE_DIR}/${PACKAGE_NAME}" -C "${RELEASE_DIR}" openclaw-trading-bot
