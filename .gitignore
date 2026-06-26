@@ -2,3 +2,8 @@
 __pycache__/
 *.log
 .DS_Store
+release/
+*.tar.gz
+*.db
+.cf-pages-release/
+redesign-preview*.png
