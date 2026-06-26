@@ -293,7 +293,7 @@ def fetch_spot_balances(config: Config) -> List[Dict[str, Any]]:
 
 def fetch_options_balances(config: Config) -> List[Dict[str, Any]]:
     try:
-        account = signed_get(EAPI_BASE, "/eapi/v1/account", {}, config)
+        account = signed_get(EAPI_BASE, "/eapi/v1/marginAccount", {}, config)
     except SyncError as error:
         print(f"[WARN] Options account balance unavailable: {error}")
         return []
@@ -302,6 +302,14 @@ def fetch_options_balances(config: Config) -> List[Dict[str, Any]]:
             rows = account.get(key)
             if isinstance(rows, list):
                 return rows
+        for asset_key in ("asset", "currency"):
+            if account.get(asset_key):
+                return [account]
+        for balance_key in ("equity", "marginBalance", "accountEquity", "totalMarginBalance", "walletBalance"):
+            if account.get(balance_key) is not None:
+                row = dict(account)
+                row.setdefault("asset", "USDT")
+                return [row]
     return account if isinstance(account, list) else []
 
 
@@ -387,7 +395,7 @@ def fetch_total_assets(config: Config) -> Dict[str, Any]:
 
     for row in fetch_options_balances(config):
         asset = str(row.get("asset") or row.get("currency") or "").upper()
-        amount = first_float(row, ["equity", "marginBalance", "walletBalance", "available", "balance"]) or 0.0
+        amount = first_float(row, ["equity", "marginBalance", "accountEquity", "totalMarginBalance", "walletBalance", "available", "balance"]) or 0.0
         add_asset_value(breakdown, "options", asset, amount, price_cache)
 
     total = sum(float(item.get("total_usdt", 0.0)) for item in breakdown.values())
