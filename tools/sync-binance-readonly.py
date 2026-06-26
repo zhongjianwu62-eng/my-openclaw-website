@@ -9,8 +9,6 @@ Safety model:
 - Frontend continues to read local JSON only.
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import hmac
@@ -22,10 +20,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,18 +41,26 @@ class SyncError(RuntimeError):
     pass
 
 
-@dataclass
 class Config:
-    api_key: str
-    api_secret: str
-    markets: list[str]
-    sync_days: int
-    initial_balance: float
-    strict_permission_check: bool
+    def __init__(
+        self,
+        api_key,
+        api_secret,
+        markets,
+        sync_days,
+        initial_balance,
+        strict_permission_check,
+    ):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.markets = markets
+        self.sync_days = sync_days
+        self.initial_balance = initial_balance
+        self.strict_permission_check = strict_permission_check
 
 
-def load_dotenv(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
+def load_dotenv(path: Path) -> Dict[str, str]:
+    values: Dict[str, str] = {}
     if not path.exists():
         return values
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -67,7 +72,7 @@ def load_dotenv(path: Path) -> dict[str, str]:
     return values
 
 
-def getenv(name: str, env_file_values: dict[str, str], default: str = "") -> str:
+def getenv(name: str, env_file_values: Dict[str, str], default: str = "") -> str:
     return os.environ.get(name, env_file_values.get(name, default)).strip()
 
 
@@ -102,13 +107,13 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def sign_query(params: dict[str, Any], api_secret: str) -> str:
+def sign_query(params: Dict[str, Any], api_secret: str) -> str:
     query = urllib.parse.urlencode(params, doseq=True)
     signature = hmac.new(api_secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{query}&signature={signature}"
 
 
-def signed_get(base_url: str, path: str, params: dict[str, Any], config: Config) -> Any:
+def signed_get(base_url: str, path: str, params: Dict[str, Any], config: Config) -> Any:
     payload = dict(params)
     payload.setdefault("recvWindow", 5000)
     payload["timestamp"] = now_ms()
@@ -154,10 +159,10 @@ def check_permissions(config: Config) -> None:
         raise SyncError("API key does not have reading permission enabled")
 
 
-def fetch_user_trades(config: Config) -> list[dict[str, Any]]:
+def fetch_user_trades(config: Config) -> List[Dict[str, Any]]:
     end = now_ms()
     start = end - config.sync_days * 24 * 60 * 60 * 1000
-    all_trades: list[dict[str, Any]] = []
+    all_trades: List[Dict[str, Any]] = []
 
     for symbol in config.markets:
         chunk_start = start
@@ -180,14 +185,14 @@ def fetch_user_trades(config: Config) -> list[dict[str, Any]]:
             time.sleep(0.08)
 
     all_trades.sort(key=lambda item: int(item.get("time", 0)))
-    deduped: dict[str, dict[str, Any]] = {}
+    deduped: Dict[str, Dict[str, Any]] = {}
     for row in all_trades:
         trade_id = f"{row.get('symbol')}:{row.get('id')}:{row.get('orderId')}:{row.get('time')}"
         deduped[trade_id] = row
     return list(deduped.values())
 
 
-def fetch_usdt_balance(config: Config) -> float | None:
+def fetch_usdt_balance(config: Config) -> Optional[float]:
     try:
         balances = signed_get(FAPI_BASE, "/fapi/v2/balance", {}, config)
     except SyncError as error:
@@ -205,12 +210,12 @@ def fetch_usdt_balance(config: Config) -> float | None:
     return None
 
 
-def datetime_from_ms(value: int | str) -> str:
+def datetime_from_ms(value: Any) -> str:
     timestamp = int(value) / 1000
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def infer_direction(row: dict[str, Any], realized_pnl: float) -> str:
+def infer_direction(row: Dict[str, Any], realized_pnl: float) -> str:
     position_side = str(row.get("positionSide") or "").upper()
     side = str(row.get("side") or "").upper()
     if position_side == "SHORT":
@@ -222,8 +227,8 @@ def infer_direction(row: dict[str, Any], realized_pnl: float) -> str:
     return "long" if side == "BUY" else "short"
 
 
-def normalize_trades(raw_trades: list[dict[str, Any]], initial_balance: float) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
+def normalize_trades(raw_trades: List[Dict[str, Any]], initial_balance: float) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
     running_balance = float(initial_balance)
 
     for row in raw_trades:
@@ -273,7 +278,7 @@ def backup_existing_files() -> None:
             shutil.copy2(path, BACKUP_DIR / f"{path.stem}-{timestamp}.json")
 
 
-def build_status(trades: list[dict[str, Any]], api_balance: float | None) -> dict[str, Any]:
+def build_status(trades: List[Dict[str, Any]], api_balance: Optional[float]) -> Dict[str, Any]:
     existing = load_json(STATUS_FILE, {})
     final_balance = api_balance
     if final_balance is None:
@@ -309,7 +314,7 @@ def build_status(trades: list[dict[str, Any]], api_balance: float | None) -> dic
     }
 
 
-def write_outputs(trades: list[dict[str, Any]], status: dict[str, Any]) -> None:
+def write_outputs(trades: List[Dict[str, Any]], status: Dict[str, Any]) -> None:
     backup_existing_files()
     TRADES_FILE.write_text(json.dumps(trades, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     STATUS_FILE.write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
