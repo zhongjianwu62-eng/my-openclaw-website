@@ -1,0 +1,45 @@
+{
+  "description": "小龙虾每15分钟调用一次。真实接入时，15m和1h需要传入至少130根已经收盘的K线。",
+  "account": {
+    "equity_usdt": 100.0,
+    "realized_pnl_today_usdt": -2.5,
+    "consecutive_losses": 1,
+    "open_positions": []
+  },
+  "candles_by_symbol": {
+    "ETHUSDT": {
+      "15m": [
+        {
+          "open_time": "2026-07-02T10:00:00Z",
+          "close_time": "2026-07-02T10:14:59Z",
+          "open": 3500,
+          "high": 3520,
+          "low": 3490,
+          "close": 3515,
+          "volume": 1000
+        }
+      ],
+      "1h": [
+        {
+          "open_time": "2026-07-02T09:00:00Z",
+          "close_time": "2026-07-02T09:59:59Z",
+          "open": 3450,
+          "high": 3530,
+          "low": 3440,
+          "close": 3500,
+          "volume": 5000
+        }
+      ]
+    }
+  },
+  "option_chain": [
+    {
+      "symbol": "ETH-260710-3600-C",
+      "underlying": "ETHUSDT",
+      "side": "CALL",
+      "expiry": 1783670400000,
+      "delta": 0.46
+    }
+  ]
+}
+

@@ -1,0 +1,45 @@
+[
+  {
+    "action": "OPEN_OKX_SWAP",
+    "symbol": "ETHUSDT",
+    "market": "OKX_SWAP",
+    "direction": "LONG",
+    "reason": "dense_breakout_gap_confirmed",
+    "order": {
+      "exchange": "OKX_SWAP",
+      "endpoint": "POST /api/v5/trade/order",
+      "instId": "ETH-USDT-SWAP",
+      "tdMode": "isolated",
+      "side": "buy",
+      "posSide": "long",
+      "ordType": "market",
+      "sz": "0.00142857"
+    },
+    "risk_blocked": false,
+    "debug": {
+      "timing": "execute_on_next_m15_open",
+      "notional_usdt": 5.0,
+      "reference_close": 3500.0
+    }
+  },
+  {
+    "action": "OPEN_BINANCE_OPTION",
+    "symbol": "ETHUSDT",
+    "market": "BINANCE_OPTIONS",
+    "direction": "LONG",
+    "reason": "dense_breakout_gap_confirmed",
+    "order": {
+      "exchange": "BINANCE_OPTIONS",
+      "endpoint": "POST /eapi/v1/order",
+      "symbol": "ETH-260710-3600-C",
+      "side": "BUY",
+      "type": "MARKET",
+      "quantity": "0.01"
+    },
+    "risk_blocked": false,
+    "debug": {
+      "timing": "execute_on_next_m15_open"
+    }
+  }
+]
+
